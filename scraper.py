@@ -2,6 +2,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
@@ -20,6 +21,7 @@ class GoogleMapsScraper:
         self.options.add_argument("--disable-gpu")
         self.options.add_argument("--window-size=1920,1080")
         self.options.add_argument("--lang=zh-TW")
+        self.options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         
         # 嘗試在 Streamlit Cloud (Linux) 與本地 Windows 之間尋找最佳啟動方式
         try:
@@ -40,51 +42,85 @@ class GoogleMapsScraper:
 
     def scrape_reviews(self, url, max_reviews=50):
         self.driver.get(url)
-        time.sleep(5) # 等待頁面加載
+        time.sleep(8)
 
         reviews_data = []
         try:
-            # 找到捲動區域 (評論欄位)
-            # 嘗試找包含評論的捲動容器
-            scrollable_div = self.driver.find_element(By.XPATH, '//div[@role="main"]//div[contains(@class, "m67Hec")]')
-            
+            # 1. 尋找捲動容器
+            scrollable_div = None
+            # 根據 debug_page.html，評論通常在 role="main" 的 div 裡面
+            try:
+                # 嘗試定位評論專用的捲動區域
+                wait = WebDriverWait(self.driver, 10)
+                scrollable_div = wait.until(EC.presence_of_element_located((By.XPATH, '//div[@role="main" and @tabindex="-1"]')))
+            except:
+                # 備用定位
+                selectors = ['//div[contains(@class, "m67Hec")]', '//div[@role="main"]', '//div[@id="pane"]']
+                for s in selectors:
+                    try:
+                        scrollable_div = self.driver.find_element(By.XPATH, s)
+                        if scrollable_div: break
+                    except: continue
+
+            if not scrollable_div:
+                print("Could not find scrollable container.")
+                return pd.DataFrame()
+
+            # 2. 開始捲動與抓取
             last_height = self.driver.execute_script("return arguments[0].scrollHeight", scrollable_div)
             
-            while len(reviews_data) < max_reviews:
-                # 捲動到最底部
-                self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scrollable_div)
-                time.sleep(2)
+            for _ in range(20): # 限制捲動次數
+                # 取得目前所有的評論容器
+                elements = self.driver.find_elements(By.XPATH, '//div[@data-review-id]')
                 
-                # 取得當前載入的評論
-                review_elements = self.driver.find_elements(By.XPATH, '//div[contains(@class, "jfti7")]')
-                
-                for element in review_elements:
+                for element in elements:
                     if len(reviews_data) >= max_reviews:
                         break
-                        
+                    
                     try:
                         # 評論內容
-                        text_element = element.find_elements(By.XPATH, './/span[contains(@class, "wiI7pd")]')
-                        text = text_element[0].text if text_element else ""
+                        text = ""
+                        text_elements = element.find_elements(By.XPATH, './/span[@class="wiI7pd"]')
+                        if text_elements:
+                            text = text_elements[0].text
                         
-                        # 評分 (星等)
-                        rating_element = element.find_element(By.XPATH, './/span[contains(@class, "kv9pPn")]')
-                        rating = float(rating_element.text.split(" ")[0]) if rating_element else 0.0
+                        # 如果沒文字，找 MyEned 下的 span
+                        if not text:
+                            text_elements = element.find_elements(By.XPATH, './/div[contains(@class, "MyEned")]//span')
+                            if text_elements:
+                                text = text_elements[0].text
+
+                        # 評分
+                        rating = 0.0
+                        # 尋找包含星等的 span，通常有 aria-label
+                        star_elements = element.find_elements(By.XPATH, './/*[contains(@aria-label, "星")]')
+                        if star_elements:
+                            label = star_elements[0].get_attribute("aria-label")
+                            import re
+                            # 提取數字 (例如 "5 顆星" -> 5, "4.5 stars" -> 4.5)
+                            match = re.search(r"(\d+(\.\d+)?)", label)
+                            if match:
+                                rating = float(match.group(1))
                         
-                        # 避免重複抓取
-                        if {"review": text, "rating": rating} not in reviews_data:
+                        if text and not any(r['review'] == text for r in reviews_data):
                             reviews_data.append({"review": text, "rating": rating})
-                    except Exception as e:
+                    except:
                         continue
                 
-                # 檢查是否還有更多評論 (高度是否不再增加)
+                if len(reviews_data) >= max_reviews:
+                    break
+                
+                # JavaScript 捲動
+                self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scrollable_div)
+                time.sleep(3)
+                
                 new_height = self.driver.execute_script("return arguments[0].scrollHeight", scrollable_div)
                 if new_height == last_height:
                     break
                 last_height = new_height
-                
+
         except Exception as e:
-            print(f"Error during scraping: {e}")
+            print(f"Error: {e}")
         finally:
             self.driver.quit()
             
@@ -93,6 +129,7 @@ class GoogleMapsScraper:
 if __name__ == "__main__":
     # 測試程式碼
     scraper = GoogleMapsScraper(headless=True)
-    test_url = "https://www.google.com/maps/place/%E9%BC%8E%E6%B3%B0%E8%B1%90+%E4%BF%A1%E7%BE%A9%E5%BA%97/@25.03337,121.52988,17z/data=!4m7!3m6!1s0x3442a99187123999:0x8798993952f01f05!8m2!3d25.03337!4d121.52988!9m1!1b1!16s%2Fg%2F1tcx3_d9?entry=ttu"
+    test_url = "https://www.google.com/maps/place/7-ELEVEN+%E4%B8%B9%E8%81%AF%E9%96%80%E5%B8%82/@24.2480998,120.5595681,16z/data=!4m8!3m7!1s0x346915160a647be7:0x2f17756bc4419c8c!8m2!3d24.2504142!4d120.5658248!9m1!1b1!16s%2Fg%2F11p6wlj51c?entry=ttu&g_ep=EgoyMDI2MDMyOS4wIKXMDSoASAFQAw%3D%3D"
     df = scraper.scrape_reviews(test_url, max_reviews=10)
+    print("抓取結果:")
     print(df)
