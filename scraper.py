@@ -13,10 +13,30 @@ class GoogleMapsScraper:
         self.options = Options()
         if headless:
             self.options.add_argument("--headless")
+        
+        # 雲端環境穩定性必要參數
         self.options.add_argument("--no-sandbox")
         self.options.add_argument("--disable-dev-shm-usage")
-        self.options.add_argument("--lang=zh-TW") # 設定語系
-        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=self.options)
+        self.options.add_argument("--disable-gpu")
+        self.options.add_argument("--window-size=1920,1080")
+        self.options.add_argument("--lang=zh-TW")
+        
+        # 嘗試在 Streamlit Cloud (Linux) 與本地 Windows 之間尋找最佳啟動方式
+        try:
+            # 如果在 Streamlit Cloud 上，會自動安裝到 /usr/bin/chromium
+            import os
+            if os.path.exists("/usr/bin/chromium"):
+                self.options.binary_location = "/usr/bin/chromium"
+            
+            # 優先嘗試使用已在系統路徑中的 driver
+            self.driver = webdriver.Chrome(options=self.options)
+        except Exception:
+            # 如果失敗，再退回使用 ChromeDriverManager 自動安裝 (適用於本地 Windows)
+            try:
+                self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=self.options)
+            except Exception as e:
+                print(f"Failed to initialize WebDriver: {e}")
+                raise e
 
     def scrape_reviews(self, url, max_reviews=50):
         self.driver.get(url)
